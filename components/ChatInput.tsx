@@ -36,6 +36,7 @@ import { useFontPreferences } from "@/hooks/useFontPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
+import { SubscriptionUsageButton } from "./SubscriptionUsagePopover";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -2599,6 +2600,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onShowAll={onLoadAllModels}
               />
             )}
+            {/* Subscription plan usage button next to model */}
+            <SubscriptionUsageButton providerId={model?.provider ?? defaultModel?.provider} />
           </div>
 
           {/* spacer */}
