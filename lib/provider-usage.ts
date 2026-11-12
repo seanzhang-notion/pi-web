@@ -1,8 +1,8 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { getModelRuntimeWithExtensions } from "./model-runtime";
-import type { ProviderUsageId } from "./provider-usage-ids";
+import { isProviderUsageId, normalizeProviderId, type ProviderUsageId } from "./provider-usage-ids";
 
-export { PROVIDER_USAGE_IDS, isProviderUsageId, type ProviderUsageId } from "./provider-usage-ids";
+export { PROVIDER_USAGE_IDS, isProviderUsageId, normalizeProviderId, type ProviderUsageId } from "./provider-usage-ids";
 
 // Query formats follow @narumitw/pi-usage (MIT, Copyright (c) 2026 narumiruna),
 // but this module deliberately has no runtime dependency on that extension.
@@ -46,7 +46,10 @@ export type ProviderUsageResult =
 
 const ENDPOINTS: Record<ProviderUsageId, string> = {
   antigravity: "https://daily-cloudcode-pa.googleapis.com",
+  google: "https://daily-cloudcode-pa.googleapis.com",
   "openai-codex": "https://chatgpt.com/backend-api/wham/usage",
+  xai: "https://api.x.ai",
+  anthropic: "https://api.anthropic.com",
   deepseek: "https://api.deepseek.com/user/balance",
   openrouter: "https://openrouter.ai/api/v1/key",
   moonshotai: "https://api.moonshot.ai/v1/users/me/balance",
@@ -59,8 +62,11 @@ const ENDPOINTS: Record<ProviderUsageId, string> = {
 };
 
 const PROVIDER_NAMES: Record<ProviderUsageId, string> = {
-  antigravity: "Antigravity",
+  antigravity: "Google (Antigravity)",
+  google: "Google",
   "openai-codex": "OpenAI Codex",
+  xai: "xAI",
+  anthropic: "Claude (Anthropic)",
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
   moonshotai: "Moonshot AI",
@@ -79,23 +85,36 @@ const CURRENCY: Record<"moonshotai" | "moonshotai-cn" | "minimax" | "minimax-cn"
   "minimax-cn": "CNY",
 };
 
-export async function queryProviderUsage(providerId: ProviderUsageId): Promise<ProviderUsageResult> {
+export async function queryProviderUsage(rawProviderId: string): Promise<ProviderUsageResult> {
+  const normalizedId = normalizeProviderId(rawProviderId);
+  const providerId = (isProviderUsageId(normalizedId) ? normalizedId : "antigravity") as ProviderUsageId;
+
   let runtime: ModelRuntime;
   try {
     runtime = await getModelRuntimeWithExtensions();
   } catch {
     runtime = await ModelRuntime.create({ refreshOnCreate: false });
   }
-  const provider = runtime.getProvider(providerId);
+
+  // Handle google alias to antigravity if antigravity is configured
+  let effectiveProviderId = providerId;
+  if (effectiveProviderId === "google") {
+    const antiStatus = runtime.getProviderAuthStatus("antigravity");
+    if (antiStatus.configured) {
+      effectiveProviderId = "antigravity";
+    }
+  }
+
+  const provider = runtime.getProvider(effectiveProviderId);
   // Catalog providers such as opencode-go carry their base URL per model rather than on the
   // provider, so fall back to the first model before rejecting a non-official origin.
   const baseUrl = provider?.baseUrl ?? provider?.getModels()[0]?.baseUrl;
-  if (!provider || !isOfficialProviderUsageOrigin(providerId, baseUrl)) {
+  if (!provider || !isOfficialProviderUsageOrigin(effectiveProviderId, baseUrl)) {
     return { providerId, status: "query-failed", message: "The provider usage query failed." };
   }
   let resolved;
   try {
-    resolved = await runtime.getAuth(providerId);
+    resolved = await runtime.getAuth(effectiveProviderId);
   } catch {
     return { providerId, status: "auth-unavailable", message: "Provider authentication is unavailable." };
   }
@@ -103,16 +122,25 @@ export async function queryProviderUsage(providerId: ProviderUsageId): Promise<P
     return { providerId, status: "auth-unavailable", message: "Connect this provider before querying usage." };
   }
 
+  let credentialInfo: Record<string, unknown> | undefined;
   try {
-    const payload = await fetchJson(providerId, resolved.auth);
+    const cred = await (runtime as unknown as { credentials?: { read: (id: string) => Promise<Record<string, unknown> | null> } })
+      .credentials?.read(effectiveProviderId);
+    if (cred && typeof cred === "object") {
+      credentialInfo = cred;
+    }
+  } catch {}
+
+  try {
+    const payload = await fetchJson(effectiveProviderId, resolved.auth, credentialInfo);
     const capturedAt = Date.now();
     return {
       providerId,
       status: "ready",
-      report: normalize(providerId, payload, capturedAt),
+      report: normalize(effectiveProviderId, payload, capturedAt),
     };
-  } catch {
-    return { providerId, status: "query-failed", message: "The provider usage query failed." };
+  } catch (caught) {
+    return { providerId, status: "query-failed", message: caught instanceof Error ? caught.message : "The provider usage query failed." };
   }
 }
 
@@ -120,7 +148,7 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
   apiKey?: string;
   headers?: Record<string, string | null>;
   baseUrl?: string;
-}): Promise<Record<string, unknown>> {
+}, credential?: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (auth.baseUrl && !isOfficialProviderUsageOrigin(providerId, auth.baseUrl)) {
     throw new Error("A custom provider origin cannot be used for official usage queries.");
   }
@@ -131,12 +159,16 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
   if (!headers.has("authorization") && auth.apiKey) headers.set("Authorization", `Bearer ${auth.apiKey}`);
 
   let endpoint = ENDPOINTS[providerId];
-  if (providerId === "antigravity") {
+  if (providerId === "antigravity" || providerId === "google") {
     let token = auth.apiKey;
+    let projId = typeof credential?.projectId === "string" ? credential.projectId : undefined;
+    let email = typeof credential?.email === "string" ? credential.email : undefined;
     if (token?.startsWith("{")) {
       try {
         const parsed = JSON.parse(token);
         if (typeof parsed.token === "string") token = parsed.token;
+        if (typeof parsed.projectId === "string") projId = parsed.projectId;
+        if (typeof parsed.email === "string") email = parsed.email;
       } catch {}
     }
     const reqHeaders = new Headers();
@@ -162,12 +194,79 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
           continue;
         }
         const parsed: unknown = await response.json();
-        if (isRecord(parsed)) return parsed;
+        if (isRecord(parsed)) {
+          parsed._authInfo = { email, projectId: projId };
+          return parsed;
+        }
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
       }
     }
     throw lastError ?? new Error("Antigravity usage query failed.");
+  }
+  if (providerId === "openai-codex") {
+    const token = auth.apiKey || (typeof credential?.access === "string" ? credential.access : "");
+    let jwtData: Record<string, unknown> = {};
+    if (token) {
+      try {
+        const parts = token.split(".");
+        if (parts.length === 3) {
+          jwtData = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+        }
+      } catch {}
+    }
+    const response = await fetch(endpoint, {
+      headers,
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.text();
+    if (body.length > 65_536) throw new Error("Usage response was too large.");
+    if (!response.ok) throw new Error(`Usage endpoint returned ${response.status}.`);
+    const parsed: unknown = JSON.parse(body);
+    if (!isRecord(parsed)) throw new Error("Usage response was not an object.");
+    parsed._jwt = jwtData;
+    if (credential?.email) parsed._email = credential.email;
+    return parsed;
+  }
+  if (providerId === "xai") {
+    const token = auth.apiKey;
+    const reqHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
+    let meData: Record<string, unknown> = {};
+    let userData: Record<string, unknown> = {};
+    try {
+      const res = await fetch("https://api.x.ai/v1/me", { headers: reqHeaders, signal: AbortSignal.timeout(10_000) });
+      if (res.ok) meData = (await res.json()) as Record<string, unknown>;
+    } catch {}
+    try {
+      const res = await fetch("https://auth.x.ai/oauth2/userinfo", { headers: reqHeaders, signal: AbortSignal.timeout(10_000) });
+      if (res.ok) userData = (await res.json()) as Record<string, unknown>;
+    } catch {}
+
+    let jwtData: Record<string, unknown> = {};
+    if (token) {
+      try {
+        const parts = token.split(".");
+        if (parts.length === 3) {
+          jwtData = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+        }
+      } catch {}
+    }
+
+    return { me: meData, user: userData, jwt: jwtData };
+  }
+  if (providerId === "anthropic") {
+    const token = auth.apiKey;
+    const reqHeaders: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      "anthropic-version": "2023-06-01",
+    };
+    let orgData: Record<string, unknown> = {};
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/organizations", { headers: reqHeaders, signal: AbortSignal.timeout(10_000) });
+      if (res.ok) orgData = (await res.json()) as Record<string, unknown>;
+    } catch {}
+    return { org: orgData };
   }
   if (providerId === "minimax" || providerId === "minimax-cn") {
     const token = bearerToken(headers.get("authorization")) ?? auth.apiKey;
@@ -188,13 +287,36 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
 
 export function isOfficialProviderUsageOrigin(providerId: ProviderUsageId, baseUrl: string | undefined): boolean {
   if (!baseUrl) return false;
-  if (providerId === "antigravity") {
+  if (providerId === "antigravity" || providerId === "google") {
     try {
       const origin = new URL(baseUrl).origin;
       return [
         "https://daily-cloudcode-pa.googleapis.com",
         "https://cloudcode-pa.googleapis.com",
         "https://daily-cloudcode-pa.sandbox.googleapis.com",
+        "https://generativelanguage.googleapis.com",
+      ].some((official) => origin === new URL(official).origin);
+    } catch {
+      return false;
+    }
+  }
+  if (providerId === "xai") {
+    try {
+      const origin = new URL(baseUrl).origin;
+      return [
+        "https://api.x.ai",
+        "https://auth.x.ai",
+      ].some((official) => origin === new URL(official).origin);
+    } catch {
+      return false;
+    }
+  }
+  if (providerId === "anthropic") {
+    try {
+      const origin = new URL(baseUrl).origin;
+      return [
+        "https://api.anthropic.com",
+        "https://claude.ai",
       ].some((official) => origin === new URL(official).origin);
     } catch {
       return false;
@@ -209,7 +331,13 @@ export function isOfficialProviderUsageOrigin(providerId: ProviderUsageId, baseU
 
 function normalize(providerId: ProviderUsageId, payload: Record<string, unknown>, capturedAt: number): UsageReport {
   switch (providerId) {
-    case "antigravity": return normalizeAntigravity(payload, capturedAt);
+    case "antigravity":
+    case "google":
+      return normalizeAntigravity(payload, capturedAt);
+    case "xai":
+      return normalizeXai(payload, capturedAt);
+    case "anthropic":
+      return normalizeAnthropic(payload, capturedAt);
     case "openai-codex": return normalizeCodex(payload, capturedAt);
     case "deepseek": return normalizeDeepSeek(payload, capturedAt);
     case "openrouter": return normalizeOpenRouter(payload, capturedAt);
@@ -272,12 +400,95 @@ function normalizeAntigravity(payload: Record<string, unknown>, capturedAt: numb
     }
   }
   if (!buckets.length) throw new Error("Antigravity returned no usage data.");
+
+  const authInfo = record(payload._authInfo);
+  const email = stringValue(authInfo?.email);
+  const projectId = stringValue(authInfo?.projectId);
+
+  let tierName = "Google AI";
+  if (projectId === "aicode-consumers") {
+    tierName = "Developer / Consumer";
+  } else if (projectId) {
+    tierName = projectId;
+  }
+
+  const metrics: UsageMetric[] = [];
+  metrics.push({ id: "tier", label: "Subscription Tier", value: tierName });
+  if (email) metrics.push({ id: "account", label: "Account", value: email });
+  const allUsed = buckets.length > 0 && buckets.every((b) => b.remaining === 0);
+  metrics.push({ id: "status", label: "Account Status", value: allUsed ? "Quota Reached" : "Active" });
+
   return {
     providerId: "antigravity",
     providerName: PROVIDER_NAMES.antigravity,
     capturedAt,
     buckets,
-    metrics: [],
+    metrics,
+  };
+}
+
+function normalizeXai(payload: Record<string, unknown>, capturedAt: number): UsageReport {
+  const jwt = record(payload.jwt) ?? {};
+  const me = record(payload.me) ?? {};
+  const user = record(payload.user) ?? {};
+
+  const tier = jwt.tier !== undefined ? `Tier ${jwt.tier}` : "Active";
+  const email = stringValue(user.email);
+  const name = stringValue(user.name);
+  const teamBlocked = me.team_blocked === true;
+  const exp = number(jwt.exp);
+
+  const buckets: UsageBucket[] = [
+    {
+      id: "xai:subscription",
+      label: "Grok Subscription",
+      groupLabel: "xAI",
+      remaining: teamBlocked ? 0 : 100,
+      used: teamBlocked ? 100 : 0,
+      limit: 100,
+      unit: "percent",
+      ...(exp ? { resetsAt: exp } : {}),
+    },
+  ];
+
+  const metrics: UsageMetric[] = [];
+  metrics.push({ id: "tier", label: "Subscription Tier", value: tier });
+  if (email || name) metrics.push({ id: "account", label: "Account", value: email || name || "" });
+  metrics.push({ id: "status", label: "Account Status", value: teamBlocked ? "Quota Reached" : "Active" });
+
+  return {
+    providerId: "xai",
+    providerName: PROVIDER_NAMES.xai,
+    capturedAt,
+    buckets,
+    metrics,
+  };
+}
+
+function normalizeAnthropic(payload: Record<string, unknown>, capturedAt: number): UsageReport {
+  const org = record(payload.org) ?? {};
+  const buckets: UsageBucket[] = [
+    {
+      id: "claude:subscription",
+      label: "Claude Plan",
+      groupLabel: "Anthropic",
+      remaining: 100,
+      used: 0,
+      limit: 100,
+      unit: "percent",
+    },
+  ];
+  const metrics: UsageMetric[] = [];
+  const orgName = stringValue(org.name);
+  if (orgName) metrics.push({ id: "org", label: "Organization", value: orgName });
+  metrics.push({ id: "status", label: "Status", value: "Active" });
+
+  return {
+    providerId: "anthropic",
+    providerName: PROVIDER_NAMES.anthropic,
+    capturedAt,
+    buckets,
+    metrics,
   };
 }
 
@@ -311,6 +522,20 @@ function normalizeCodex(payload: Record<string, unknown>, capturedAt: number): U
     if (rate) addGroup(rate, stringValue(value?.limit_name) ?? `Limit ${index + 1}`, stringValue(value?.metered_feature) ?? `additional-${index}`);
   });
   const metrics: UsageMetric[] = [];
+  const jwt = record(payload._jwt) ?? {};
+  const authPayload = record(jwt["https://api.openai.com/auth"]);
+  const profilePayload = record(jwt["https://api.openai.com/profile"]);
+
+  const rawPlan = stringValue(authPayload?.chatgpt_plan_type);
+  const planName = rawPlan ? `ChatGPT ${rawPlan.charAt(0).toUpperCase() + rawPlan.slice(1)}` : "ChatGPT";
+  const email = stringValue(profilePayload?.email) || stringValue(payload._email);
+  const name = stringValue(profilePayload?.name);
+
+  metrics.push({ id: "tier", label: "Subscription Tier", value: planName });
+  if (email || name) metrics.push({ id: "account", label: "Account", value: email || name || "" });
+  const allUsed = buckets.length > 0 && buckets.every((b) => b.remaining === 0);
+  metrics.push({ id: "status", label: "Account Status", value: allUsed ? "Quota Reached" : "Active" });
+
   const credits = record(payload.credits);
   if (credits?.unlimited === true) metrics.push({ id: "credits", label: "Credits", value: "Unlimited" });
   else if (number(credits?.balance) !== undefined) metrics.push({ id: "credits", label: "Credits", value: number(credits?.balance)!, unit: "count" });

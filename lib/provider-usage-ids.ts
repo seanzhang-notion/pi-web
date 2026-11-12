@@ -1,6 +1,9 @@
 export const PROVIDER_USAGE_IDS = [
   "antigravity",
+  "google",
   "openai-codex",
+  "xai",
+  "anthropic",
   "deepseek",
   "openrouter",
   "moonshotai",
@@ -14,6 +17,14 @@ export const PROVIDER_USAGE_IDS = [
 
 export type ProviderUsageId = (typeof PROVIDER_USAGE_IDS)[number];
 
+export function normalizeProviderId(id: string): ProviderUsageId | string {
+  if (id === "codex") return "openai-codex";
+  if (id === "claude") return "anthropic";
+  if (id === "gemini") return "antigravity";
+  return id;
+}
+
 export function isProviderUsageId(value: string): value is ProviderUsageId {
-  return (PROVIDER_USAGE_IDS as readonly string[]).includes(value);
+  const normalized = normalizeProviderId(value);
+  return (PROVIDER_USAGE_IDS as readonly string[]).includes(normalized);
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { formatUpdatedTime } from "@/lib/i18n/format";
-import { isProviderUsageId } from "@/lib/provider-usage-ids";
+import { isProviderUsageId, normalizeProviderId } from "@/lib/provider-usage-ids";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
 type UsageBucket = {
@@ -23,6 +23,11 @@ type UsageBucket = {
 type UsageMetric = { id: string; label: string; value: number | string; unit?: string; currency?: string };
 type UsageReport = { providerId: string; providerName: string; capturedAt: number; buckets: UsageBucket[]; metrics: UsageMetric[]; notes?: string[] };
 type UsageResponse = { providerId: string; status: "ready" | "auth-unavailable" | "query-failed"; report?: UsageReport; message?: string };
+
+export type ConnectedProviderInfo = {
+  id: string;
+  name: string;
+};
 
 const STORAGE_PREFIX = "pi-web:provider-usage:";
 
@@ -89,10 +94,10 @@ function CircularProgressRing({ remaining }: { remaining: number }) {
 }
 
 export function SubscriptionUsageButton({
-  providerId,
+  providerId: preferredProviderId,
   disabled = false,
 }: {
-  providerId: string;
+  providerId?: string | null;
   disabled?: boolean;
 }) {
   const { t, locale } = useI18n();
@@ -101,45 +106,77 @@ export function SubscriptionUsageButton({
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [anchorRect, setAnchorRect] = useState<{ top: number; right: number; bottom: number; left: number; width: number } | null>(null);
-  const [snapshot, setSnapshot] = useState<UsageResponse | null>(null);
+
+  // List of connected providers
+  const [connectedProviders, setConnectedProviders] = useState<ConnectedProviderInfo[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string>("");
+  const [snapshots, setSnapshots] = useState<Record<string, UsageResponse>>({});
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load cached usage from localStorage
+  // Load connected providers on mount
   useEffect(() => {
-    if (!isProviderUsageId(providerId)) {
-      setSnapshot(null);
-      return;
+    let cancelled = false;
+    async function loadConnected() {
+      try {
+        const res = await fetch("/api/provider-usage/query");
+        if (!res.ok) return;
+        const data = (await res.json()) as { connectedProviders?: ConnectedProviderInfo[] };
+        if (cancelled || !Array.isArray(data.connectedProviders)) return;
+
+        setConnectedProviders(data.connectedProviders);
+      } catch {}
     }
+    loadConnected();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Sync activeProviderId with preferredProviderId or default to first connected provider
+  useEffect(() => {
+    const normalized = preferredProviderId ? normalizeProviderId(preferredProviderId) : "";
+    if (normalized && (connectedProviders.some((p) => p.id === normalized) || isProviderUsageId(normalized))) {
+      setActiveProviderId(normalized);
+    } else if (connectedProviders.length > 0 && !connectedProviders.some((p) => p.id === activeProviderId)) {
+      setActiveProviderId(connectedProviders[0].id);
+    } else if (!activeProviderId && preferredProviderId && isProviderUsageId(preferredProviderId)) {
+      setActiveProviderId(preferredProviderId);
+    }
+  }, [preferredProviderId, connectedProviders, activeProviderId]);
+
+  // Load cached usage from localStorage for activeProviderId
+  useEffect(() => {
+    if (!activeProviderId) return;
     try {
-      const cached = localStorage.getItem(`${STORAGE_PREFIX}${providerId}`);
+      const cached = localStorage.getItem(`${STORAGE_PREFIX}${activeProviderId}`);
       if (cached) {
         const parsed = JSON.parse(cached) as UsageResponse;
         if (parsed?.status === "ready" && parsed.report && Array.isArray(parsed.report.buckets)) {
-          setSnapshot(parsed);
+          setSnapshots((prev) => ({ ...prev, [activeProviderId]: parsed }));
         }
       }
     } catch {
-      try { localStorage.removeItem(`${STORAGE_PREFIX}${providerId}`); } catch {}
+      try { localStorage.removeItem(`${STORAGE_PREFIX}${activeProviderId}`); } catch {}
     }
     setError(null);
-  }, [providerId]);
+  }, [activeProviderId]);
 
-  const query = useCallback(async () => {
-    if (!isProviderUsageId(providerId)) return;
+  const query = useCallback(async (targetProviderId = activeProviderId) => {
+    if (!targetProviderId) return;
     setQuerying(true);
     setError(null);
     try {
       const response = await fetch("/api/provider-usage/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerId }),
+        body: JSON.stringify({ providerId: targetProviderId }),
       });
       const result = (await response.json()) as UsageResponse & { error?: string };
       if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
       if (result.status === "ready") {
-        setSnapshot(result);
-        try { localStorage.setItem(`${STORAGE_PREFIX}${providerId}`, JSON.stringify(result)); } catch {}
+        setSnapshots((prev) => ({ ...prev, [targetProviderId]: result }));
+        try { localStorage.setItem(`${STORAGE_PREFIX}${targetProviderId}`, JSON.stringify(result)); } catch {}
       } else {
         setError(result.message ?? t("providerUsage.queryFailed"));
       }
@@ -148,7 +185,7 @@ export function SubscriptionUsageButton({
     } finally {
       setQuerying(false);
     }
-  }, [providerId, t]);
+  }, [activeProviderId, t]);
 
   // When opening, if there is no snapshot or if older than 60s, query fresh usage
   const handleToggle = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
@@ -157,15 +194,24 @@ export function SubscriptionUsageButton({
     setAnchorRect({ top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width });
     setOpen((prev) => {
       const next = !prev;
-      if (next) {
-        const captured = snapshot?.report?.capturedAt;
+      if (next && activeProviderId) {
+        const captured = snapshots[activeProviderId]?.report?.capturedAt;
         if (!captured || Date.now() - captured > 60_000) {
-          query();
+          query(activeProviderId);
         }
       }
       return next;
     });
-  }, [disabled, snapshot, query]);
+  }, [disabled, activeProviderId, snapshots, query]);
+
+  // Handle tab switch
+  const handleSelectProvider = useCallback((id: string) => {
+    setActiveProviderId(id);
+    const captured = snapshots[id]?.report?.capturedAt;
+    if (!captured || Date.now() - captured > 60_000) {
+      query(id);
+    }
+  }, [snapshots, query]);
 
   // Close on outside click
   useEffect(() => {
@@ -204,9 +250,12 @@ export function SubscriptionUsageButton({
     return () => window.removeEventListener("resize", remeasure);
   }, [open]);
 
-  if (!isProviderUsageId(providerId)) return null;
+  // If no connected providers and preferred provider isn't a known usage provider, hide button
+  const hasSupportedProvider = connectedProviders.length > 0 || (preferredProviderId && isProviderUsageId(preferredProviderId));
+  if (!hasSupportedProvider) return null;
 
-  const report = snapshot?.status === "ready" ? snapshot.report : undefined;
+  const currentSnapshot = activeProviderId ? snapshots[activeProviderId] : null;
+  const report = currentSnapshot?.status === "ready" ? currentSnapshot.report : undefined;
 
   // Group buckets by groupLabel or providerName
   const groupedBuckets = (() => {
@@ -284,7 +333,7 @@ export function SubscriptionUsageButton({
           top: aboveEnd,
           transform: "translateY(-100%)",
         };
-        const panelWidth = Math.min(340, viewportWidth - 24);
+        const panelWidth = Math.min(360, viewportWidth - 24);
         const horizontalPosition: CSSProperties = isMobile
           ? { left: 12, right: 12, maxWidth: "calc(100vw - 24px)" }
           : {
@@ -304,7 +353,7 @@ export function SubscriptionUsageButton({
               zIndex: 500,
               display: "flex",
               flexDirection: "column",
-              maxHeight: "min(460px, 65vh)",
+              maxHeight: "min(480px, 70vh)",
               overflowY: "auto",
               padding: "14px 16px",
               border: "1px solid var(--border)",
@@ -314,7 +363,7 @@ export function SubscriptionUsageButton({
             }}
           >
             {/* Header */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: connectedProviders.length > 1 ? 10 : 6 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-muted)", letterSpacing: "-0.01em" }}>
                 {t("providerUsage.usage")}
               </span>
@@ -326,7 +375,7 @@ export function SubscriptionUsageButton({
                 )}
                 <button
                   type="button"
-                  onClick={query}
+                  onClick={() => query(activeProviderId)}
                   disabled={querying}
                   title={t(querying ? "providerUsage.refreshing" : "providerUsage.refresh")}
                   aria-label={t(querying ? "providerUsage.refreshing" : "providerUsage.refresh")}
@@ -366,13 +415,56 @@ export function SubscriptionUsageButton({
               </div>
             </div>
 
+            {/* Provider Tabs based on connected model providers */}
+            {connectedProviders.length > 1 && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 3,
+                  padding: "2px",
+                  background: "var(--bg-subtle, rgba(255, 255, 255, 0.04))",
+                  border: "1px solid var(--border)",
+                  borderRadius: 7,
+                  marginBottom: 10,
+                  overflowX: "auto",
+                }}
+              >
+                {connectedProviders.map((provider) => {
+                  const isSelected = activeProviderId === provider.id;
+                  return (
+                    <button
+                      key={provider.id}
+                      type="button"
+                      onClick={() => handleSelectProvider(provider.id)}
+                      style={{
+                        flex: "1 1 auto",
+                        padding: "5px 10px",
+                        fontSize: 12,
+                        fontWeight: isSelected ? 600 : 400,
+                        border: "none",
+                        borderRadius: 5,
+                        background: isSelected ? "var(--bg-hover, rgba(255, 255, 255, 0.08))" : "transparent",
+                        color: isSelected ? "var(--text)" : "var(--text-muted)",
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        textAlign: "center",
+                        transition: "background 0.12s, color 0.12s",
+                      }}
+                    >
+                      {provider.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Error banner */}
             {error && (
               <div style={{ marginTop: 8, fontSize: 12, color: "#f87171", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span>{error}</span>
                 <button
                   type="button"
-                  onClick={query}
+                  onClick={() => query(activeProviderId)}
                   style={{ fontSize: 11, background: "none", border: "underline", color: "var(--accent)", cursor: "pointer", padding: "2px 4px" }}
                 >
                   Retry
@@ -382,7 +474,7 @@ export function SubscriptionUsageButton({
 
             {/* Loading state if no snapshot */}
             {!report && querying && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 0", gap: 8, color: "var(--text-dim)", fontSize: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 0", gap: 8, color: "var(--text-dim)", fontSize: 12 }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 0.8s linear infinite" }}>
                   <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
                   <path d="M3 3v5h5" />
@@ -392,14 +484,14 @@ export function SubscriptionUsageButton({
             )}
 
             {!report && !querying && !error && (
-              <div style={{ padding: "16px 0", textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
+              <div style={{ padding: "20px 0", textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
                 {t("providerUsage.notQueried")}
               </div>
             )}
 
             {/* Grouped Buckets */}
             {groupedBuckets.map((group, groupIdx) => (
-              <div key={group.name} style={{ marginTop: groupIdx === 0 ? 6 : 12 }}>
+              <div key={group.name} style={{ marginTop: groupIdx === 0 ? 4 : 12 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4, letterSpacing: "-0.01em" }}>
                   {group.name}
                 </div>
@@ -459,9 +551,9 @@ export function SubscriptionUsageButton({
               </div>
             ))}
 
-            {/* Metrics if any */}
+            {/* Metrics if any (e.g. tier, status, balance) */}
             {report?.metrics && report.metrics.length > 0 && (
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
                 {report.metrics.map((metric) => (
                   <div key={metric.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                     <span style={{ color: "var(--text-muted)" }}>{metric.label}</span>
