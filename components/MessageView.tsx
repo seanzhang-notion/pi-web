@@ -4,7 +4,6 @@ import { Fragment, memo, useState, useRef, useEffect, useMemo, type CSSPropertie
 import ReactMarkdown from "react-markdown";
 import { MarkdownBody } from "./MarkdownBody";
 import { ImagePreview } from "./ImagePreview";
-import { ThinkingIcon } from "./ThinkingIcon";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -869,7 +868,7 @@ function AssistantMessageView({
         tps={isStreaming ? tps : null}
       />
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {/* Not keyed by the entry id: a message of this run gets one when the file is
             read again, and its blocks keep their state across that read (#1184). */}
         {blockItems.map(({ block, originalIndex }) => (
@@ -1032,6 +1031,62 @@ function ThinkingText({ text }: { text: string }) {
   return pieces.map((piece, index) => <div key={index}>{piece.text}</div>);
 }
 
+function getAntigravityFileBadge(filename: string | null): { label: string; color: string; bg: string } | null {
+  if (!filename) return null;
+  const ext = filename.includes(".") ? filename.split(".").pop()?.toLowerCase() || "" : "";
+  if (ext === "tsx" || ext === "jsx") {
+    return { label: "⚛", color: "#06b6d4", bg: "rgba(6, 182, 212, 0.15)" };
+  }
+  if (ext === "js" || ext === "cjs" || ext === "mjs") {
+    return { label: "js", color: "#eab308", bg: "rgba(234, 179, 8, 0.15)" };
+  }
+  if (ext === "ts" || ext === "mts" || ext === "cts") {
+    return { label: "ts", color: "#3b82f6", bg: "rgba(59, 130, 246, 0.15)" };
+  }
+  if (ext === "html" || ext === "svg" || ext === "xml") {
+    return { label: "</>", color: "#f97316", bg: "rgba(249, 115, 22, 0.15)" };
+  }
+  if (ext === "css" || ext === "scss" || ext === "less") {
+    return { label: "#", color: "#a855f7", bg: "rgba(168, 85, 247, 0.15)" };
+  }
+  if (ext === "json" || ext === "yaml" || ext === "yml") {
+    return { label: "{}", color: "#10b981", bg: "rgba(16, 185, 129, 0.15)" };
+  }
+  if (ext === "py") {
+    return { label: "py", color: "#38bdf8", bg: "rgba(56, 189, 248, 0.15)" };
+  }
+  if (ext === "sh" || ext === "bash" || ext === "zsh") {
+    return { label: "sh", color: "#22c55e", bg: "rgba(34, 197, 94, 0.15)" };
+  }
+  if (ext === "md" || ext === "markdown") {
+    return { label: "md", color: "#94a3b8", bg: "rgba(148, 163, 184, 0.15)" };
+  }
+  if (!ext) return null;
+  return { label: ext, color: "#9ca3af", bg: "rgba(156, 163, 175, 0.15)" };
+}
+
+function getAntigravityDiffStats(resultDiffText?: string, writtenText?: string | null): { added: number; removed: number } | null {
+  if (resultDiffText) {
+    let added = 0;
+    let removed = 0;
+    for (const line of resultDiffText.split("\n")) {
+      if (line.startsWith("+") && !line.startsWith("+++")) added++;
+      else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+    }
+    if (added > 0 || removed > 0) return { added, removed };
+  }
+  if (writtenText) {
+    const lines = writtenText.split("\n").length;
+    return { added: lines, removed: 0 };
+  }
+  return null;
+}
+
+function isReadToolName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === "read" || lower.startsWith("read_") || lower.endsWith(".read") || lower.endsWith("_read") || lower === "read_file";
+}
+
 export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
@@ -1098,13 +1153,10 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
 
   return (
     <div style={{
-      display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0,
-      border: "1px solid var(--border)",
-      borderRadius: 7,
-      padding: "6px 10px",
-      background: "var(--bg)",
+      display: "flex", flexDirection: "column", gap: 3, minWidth: 0,
+      margin: "2px 0",
       fontFamily: "var(--font-mono)",
-      fontSize: "calc(11px + var(--chat-font-size-offset, 0px))",
+      fontSize: "calc(12px + var(--chat-font-size-offset, 0px))",
       lineHeight: 1.5,
     }}>
       <button
@@ -1117,41 +1169,74 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
-          width: expanded ? 14 : "100%",
-          flexShrink: expanded ? 0 : 1,
-          minWidth: 0,
-          minHeight: "1.5em",
-          padding: 0,
+          width: "100%",
+          padding: "3px 6px",
           background: "transparent",
           border: "none",
+          borderRadius: 4,
           color: "var(--text-muted)",
           cursor: "pointer",
           font: "inherit",
           textAlign: "left",
+          transition: "background 0.12s, color 0.12s",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--bg-hover, rgba(255, 255, 255, 0.04))";
+          e.currentTarget.style.color = "var(--text)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "var(--text-muted)";
         }}
       >
-        <ThinkingIcon active={expanded} />
-        {!expanded && (
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {preview ? <ReactMarkdown allowedElements={[]} unwrapDisallowed skipHtml>{preview}</ReactMarkdown> : "..."}
-          </span>
+        <span style={{ color: "var(--text-muted)", fontWeight: 400, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {expanded
+            ? (duration !== undefined ? `Thinking for ${duration}s` : t("i18n.thinking"))
+            : (duration !== undefined ? `Thought for ${duration}s` : (preview ? <ReactMarkdown allowedElements={[]} unwrapDisallowed skipHtml>{preview}</ReactMarkdown> : t("i18n.thinking")))}
+          {!expanded && duration !== undefined && preview && (
+            <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>
+              · <ReactMarkdown allowedElements={[]} unwrapDisallowed skipHtml>{preview}</ReactMarkdown>
+            </span>
+          )}
+        </span>
+        {duration !== undefined && (
+          <span style={{ flexShrink: 0, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums", fontSize: 11, marginRight: 2 }}>{duration}s</span>
         )}
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            flexShrink: 0,
+            transform: expanded ? "rotate(90deg)" : "none",
+            transition: "transform 0.15s",
+            color: "var(--text-dim)",
+          }}
+        >
+          <path d="M3.5 2L6.5 5L3.5 8" />
+        </svg>
       </button>
+
       {expanded && (
         <div
           style={{
-            flex: 1,
-            minWidth: 0,
+            paddingLeft: 14,
+            paddingTop: 2,
+            paddingBottom: 4,
             color: error ? "#f87171" : "var(--text-muted)",
+            fontSize: "calc(11px + var(--chat-font-size-offset, 0px))",
+            lineHeight: 1.6,
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
           }}
         >
            {loading ? t("i18n.loadingThinking") : error ?? <ThinkingText text={(block.deferred ? content : block.thinking) ?? ""} />}
         </div>
-      )}
-      {duration !== undefined && (
-        <span style={{ flexShrink: 0, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
       )}
     </div>
   );
@@ -1237,14 +1322,53 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
   const subagent = isSubagentToolDetails(result?.details) ? result.details : null;
   const codemodeCallCount = codemode ? codemode.calls.length + codemode.omitted : 0;
 
+  const isRead = isReadToolName(block.toolName);
+  const isWrite = isWriteToolName(block.toolName);
+
+  const rawPath: string | null = resultPatchPath
+    ?? (typeof block.input === "object" && block.input !== null && "path" in block.input && typeof (block.input as Record<string, unknown>).path === "string" ? ((block.input as Record<string, unknown>).path as string) : null)
+    ?? (typeof block.input === "object" && block.input !== null && "file_path" in block.input && typeof (block.input as Record<string, unknown>).file_path === "string" ? ((block.input as Record<string, unknown>).file_path as string) : null)
+    ?? (typeof block.input === "object" && block.input !== null && "newPath" in block.input && typeof (block.input as Record<string, unknown>).newPath === "string" ? ((block.input as Record<string, unknown>).newPath as string) : null);
+
+  const filename = rawPath ? (rawPath.split(/[/\\]/).filter(Boolean).pop() || rawPath) : null;
+  const fileBadge = filename ? getAntigravityFileBadge(filename) : null;
+  const diffStats = useMemo(() => getAntigravityDiffStats(resultDiffText, writtenFileText), [resultDiffText, writtenFileText]);
+
+  let actionVerb = "Ran";
+  if (isEditTool || isApplyPatchToolName(block.toolName)) {
+    actionVerb = "Edited";
+  } else if (isWrite) {
+    actionVerb = "Created";
+  } else if (isRead) {
+    actionVerb = "Read";
+  } else if (block.toolName === "Agent" || block.toolName === "subagent") {
+    actionVerb = block.toolName;
+  }
+
+  const previewText = isStreamingInput
+    ? t("chat.generatingToolInput")
+    : (patchLabel ?? (codemode ? codemodeScriptPreview(codemode.code) : toolInputPreview(block.input, resultPatchPath)));
+
+  const showToolName = (
+    block.toolName === CODEMODE_TOOL_NAME
+    || block.toolName === "apply_patch"
+    || (!fileBadge && !mcpLabel && (actionVerb === "Ran" || isStreamingInput))
+  );
+
   return (
     <div
       style={{
-        borderRadius: 7,
+        borderRadius: 6,
         overflow: "hidden",
         fontSize: 12,
-        border: isError ? "1px solid rgba(248,113,113,0.45)" : "1px solid rgba(34,197,94,0.25)",
-        background: isError ? "rgba(248,113,113,0.05)" : "rgba(34,197,94,0.04)",
+        border: isError
+          ? "1px solid rgba(248,113,113,0.45)"
+          : (expanded ? "1px solid var(--border)" : "1px solid rgba(255,255,255,0.06)"),
+        background: isError
+          ? "rgba(248,113,113,0.05)"
+          : (expanded ? "var(--bg-subtle)" : "transparent"),
+        transition: "background 0.12s, border-color 0.12s",
+        margin: "1px 0",
       }}
     >
       {/* ── Tool call header ── */}
@@ -1257,41 +1381,142 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
             gap: 7,
             flex: 1,
             minWidth: 0,
-            padding: "6px 10px",
+            padding: "5px 8px",
             background: "none",
             border: "none",
             color: "var(--text-muted)",
             cursor: "pointer",
             fontSize: 12,
             textAlign: "left",
+            borderRadius: 4,
+            transition: "background 0.12s, color 0.12s",
+          }}
+          onMouseEnter={(e) => {
+            if (!expanded && !isError) {
+              e.currentTarget.style.background = "var(--bg-hover, rgba(255, 255, 255, 0.04))";
+              e.currentTarget.style.color = "var(--text)";
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!expanded && !isError) {
+              e.currentTarget.style.background = "none";
+              e.currentTarget.style.color = "var(--text-muted)";
+            }
           }}
         >
+          {/* Action Verb (Ran / Edited / Created / Read / Agent) */}
+          <span style={{ color: "var(--text-dim)", fontWeight: 400, flexShrink: 0, fontSize: 12 }}>
+            {actionVerb}
+          </span>
+
+          {/* Specific tool name when needed (e.g. codemode, generic tools) */}
+          {showToolName && (
+            <span
+              title={block.toolName}
+              style={{
+                color: isError ? "#f87171" : "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                fontWeight: 500,
+                fontSize: 11,
+                flexShrink: 0,
+              }}
+            >
+              {block.toolName}
+            </span>
+          )}
+
+          {/* File Badge (js, ts, </>, ⚛, etc.) */}
+          {fileBadge && (
+            <span
+              title={block.toolName}
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                padding: "1px 5px",
+                borderRadius: 3,
+                backgroundColor: fileBadge.bg,
+                color: fileBadge.color,
+                flexShrink: 0,
+                lineHeight: 1.2,
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {fileBadge.label}
+            </span>
+          )}
+
+          {/* MCP server/tool label if MCP and not a file action */}
+          {mcpLabel && !fileBadge && (
+            <span
+              title={block.toolName}
+              style={{
+                color: "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                fontWeight: 500,
+                fontSize: 11,
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ opacity: 0.75 }}>{mcpLabel.server}/</span>
+              {mcpLabel.tool}
+            </span>
+          )}
+
+          {/* Target / File / Command / Tool preview */}
           <span
             title={mcpLabel ? block.toolName : undefined}
-            style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}
+            style={{
+              color: isError ? "#f87171" : "var(--text)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flex: 1,
+              minWidth: 0,
+            }}
           >
-            {mcpLabel ? (
-              <>
-                <span style={{ fontWeight: 500, opacity: 0.75 }}>{mcpLabel.server}/</span>
-                {mcpLabel.tool}
-              </>
-            ) : block.toolName}
+            {previewText}
           </span>
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-            {isStreamingInput
-              ? t("chat.generatingToolInput")
-              : (patchLabel ?? (codemode ? codemodeScriptPreview(codemode.code) : toolInputPreview(block.input, resultPatchPath)))}
-          </span>
+
+          {/* Diff additions and removals */}
+          {diffStats && (
+            <span style={{ display: "inline-flex", gap: 5, fontSize: 11, fontWeight: 500, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
+              {diffStats.added > 0 && <span style={{ color: "#22c55e" }}>+{diffStats.added}</span>}
+              {diffStats.removed > 0 && <span style={{ color: "#ef4444" }}>-{diffStats.removed}</span>}
+            </span>
+          )}
+
           {codemodeCallCount > 0 && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
               {codemodeCallCount === 1 ? t("codemode.callCountOne") : t("codemode.callCount", { count: codemodeCallCount })}
             </span>
           )}
+
           {duration !== undefined && (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatToolDuration(duration)}</span>
+            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
+              {formatToolDuration(duration)}
+            </span>
           )}
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-            <polyline points="2 3.5 5 6.5 8 3.5" />
+
+          {/* Antigravity style chevron: > when collapsed, rotates down 90deg when expanded */}
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "rotate(90deg)" : "none",
+              transition: "transform 0.15s",
+              color: "var(--text-dim)",
+            }}
+          >
+            <path d="M3.5 2L6.5 5L3.5 8" />
           </svg>
         </button>
         {subagent && onOpenSubagent && (
@@ -1300,9 +1525,9 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
             onClick={() => onOpenSubagent(subagent.sessionId, subagent.description || subagent.profile)}
             title={t("subagent.openTab")}
             aria-label={t("subagent.openTab")}
-            style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+            style={{ width: 28, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
           </button>
         )}
       </div>
@@ -1314,7 +1539,7 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
             style={{
               padding: "6px 10px 8px",
               background: "var(--bg-subtle)",
-              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
+              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid var(--border)",
             }}
           >
             <ToolFieldRows fields={toolFields} />
@@ -1329,7 +1554,7 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
               lineHeight: 1.5,
               overflow: "auto",
               background: "var(--bg-subtle)",
-              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
+              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid var(--border)",
               whiteSpace: "pre-wrap",
               wordBreak: "break-all",
             }}
@@ -1349,7 +1574,7 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent, resultFooter }
 
       {/* ── Expanded: applied-patch split diff ── */}
       {expanded && patchFiles && (
-        <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
+        <div style={{ borderTop: "1px solid var(--border)", background: "var(--bg)" }}>
           <SplitFilesView files={patchFiles} />
         </div>
       )}
@@ -1390,7 +1615,7 @@ function PairedDiffResult({ diff }: {
   return (
     <div
       style={{
-        borderTop: "1px solid rgba(34,197,94,0.15)",
+        borderTop: "1px solid var(--border)",
         background: "var(--bg)",
       }}
     >
@@ -1753,7 +1978,7 @@ function ResultImages({ images, isError }: { images: ImageContent[]; isError: bo
         flexWrap: "wrap",
         padding: "10px",
         background: "var(--bg)",
-        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "rgba(34,197,94,0.15)"}`,
+        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "var(--border)"}`,
       }}
     >
       {images.map((image, index) => {
@@ -1795,7 +2020,7 @@ function PairedResult({ text, isEmpty, isError }: {
   return (
     <div
       style={{
-        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "rgba(34,197,94,0.15)"}`,
+        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "var(--border)"}`,
         background: isError ? "rgba(248,113,113,0.04)" : "var(--bg-subtle)",
       }}
     >
@@ -2368,7 +2593,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
         padding: "5px 10px",
         fontSize: 11,
         color: "var(--text-dim)",
-        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "rgba(34,197,94,0.15)"}`,
+        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "var(--border)"}`,
       }}
     >
       <span role="status">
