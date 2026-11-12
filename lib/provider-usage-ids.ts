@@ -1,4 +1,5 @@
 export const PROVIDER_USAGE_IDS = [
+  "antigravity",
   "openai-codex",
   "deepseek",
   "openrouter",

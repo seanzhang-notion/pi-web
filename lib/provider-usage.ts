@@ -1,4 +1,5 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { getModelRuntimeWithExtensions } from "./model-runtime";
 import type { ProviderUsageId } from "./provider-usage-ids";
 
 export { PROVIDER_USAGE_IDS, isProviderUsageId, type ProviderUsageId } from "./provider-usage-ids";
@@ -44,6 +45,7 @@ export type ProviderUsageResult =
   | { providerId: ProviderUsageId; status: "auth-unavailable" | "query-failed"; message: string };
 
 const ENDPOINTS: Record<ProviderUsageId, string> = {
+  antigravity: "https://daily-cloudcode-pa.googleapis.com",
   "openai-codex": "https://chatgpt.com/backend-api/wham/usage",
   deepseek: "https://api.deepseek.com/user/balance",
   openrouter: "https://openrouter.ai/api/v1/key",
@@ -57,6 +59,7 @@ const ENDPOINTS: Record<ProviderUsageId, string> = {
 };
 
 const PROVIDER_NAMES: Record<ProviderUsageId, string> = {
+  antigravity: "Antigravity",
   "openai-codex": "OpenAI Codex",
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
@@ -77,7 +80,12 @@ const CURRENCY: Record<"moonshotai" | "moonshotai-cn" | "minimax" | "minimax-cn"
 };
 
 export async function queryProviderUsage(providerId: ProviderUsageId): Promise<ProviderUsageResult> {
-  const runtime = await ModelRuntime.create({ refreshOnCreate: false });
+  let runtime: ModelRuntime;
+  try {
+    runtime = await getModelRuntimeWithExtensions();
+  } catch {
+    runtime = await ModelRuntime.create({ refreshOnCreate: false });
+  }
   const provider = runtime.getProvider(providerId);
   // Catalog providers such as opencode-go carry their base URL per model rather than on the
   // provider, so fall back to the first model before rejecting a non-official origin.
@@ -123,6 +131,44 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
   if (!headers.has("authorization") && auth.apiKey) headers.set("Authorization", `Bearer ${auth.apiKey}`);
 
   let endpoint = ENDPOINTS[providerId];
+  if (providerId === "antigravity") {
+    let token = auth.apiKey;
+    if (token?.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(token);
+        if (typeof parsed.token === "string") token = parsed.token;
+      } catch {}
+    }
+    const reqHeaders = new Headers();
+    reqHeaders.set("Authorization", `Bearer ${token ?? ""}`);
+    reqHeaders.set("Content-Type", "application/json");
+    reqHeaders.set("User-Agent", "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)");
+    const endpoints = [
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+      "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    ];
+    let lastError: Error | null = null;
+    for (const url of endpoints) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: reqHeaders,
+          body: JSON.stringify({}),
+          redirect: "error",
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!response.ok) {
+          lastError = new Error(`Usage endpoint returned ${response.status}.`);
+          continue;
+        }
+        const parsed: unknown = await response.json();
+        if (isRecord(parsed)) return parsed;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    throw lastError ?? new Error("Antigravity usage query failed.");
+  }
   if (providerId === "minimax" || providerId === "minimax-cn") {
     const token = bearerToken(headers.get("authorization")) ?? auth.apiKey;
     endpoint += token?.startsWith("sk-api-") ? "/account/query_balance" : "/v1/token_plan/remains";
@@ -142,6 +188,18 @@ async function fetchJson(providerId: ProviderUsageId, auth: {
 
 export function isOfficialProviderUsageOrigin(providerId: ProviderUsageId, baseUrl: string | undefined): boolean {
   if (!baseUrl) return false;
+  if (providerId === "antigravity") {
+    try {
+      const origin = new URL(baseUrl).origin;
+      return [
+        "https://daily-cloudcode-pa.googleapis.com",
+        "https://cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.sandbox.googleapis.com",
+      ].some((official) => origin === new URL(official).origin);
+    } catch {
+      return false;
+    }
+  }
   try {
     return new URL(baseUrl).origin === new URL(ENDPOINTS[providerId]).origin;
   } catch {
@@ -151,6 +209,7 @@ export function isOfficialProviderUsageOrigin(providerId: ProviderUsageId, baseU
 
 function normalize(providerId: ProviderUsageId, payload: Record<string, unknown>, capturedAt: number): UsageReport {
   switch (providerId) {
+    case "antigravity": return normalizeAntigravity(payload, capturedAt);
     case "openai-codex": return normalizeCodex(payload, capturedAt);
     case "deepseek": return normalizeDeepSeek(payload, capturedAt);
     case "openrouter": return normalizeOpenRouter(payload, capturedAt);
@@ -170,6 +229,56 @@ export function normalizeProviderUsagePayload(
   capturedAt = Date.now(),
 ): UsageReport {
   return normalize(providerId, payload, capturedAt);
+}
+
+function normalizeAntigravity(payload: Record<string, unknown>, capturedAt: number): UsageReport {
+  const buckets: UsageBucket[] = [];
+  const groups = Array.isArray(payload.groups) ? payload.groups : [];
+  for (const rawGroup of groups) {
+    const group = record(rawGroup);
+    if (!group) continue;
+    const groupName = stringValue(group.displayName) ?? "Quota group";
+    const rawBuckets = Array.isArray(group.buckets) ? group.buckets : [];
+    for (const rawBucket of rawBuckets) {
+      const b = record(rawBucket);
+      if (!b) continue;
+      const bucketId = stringValue(b.bucketId) ?? "bucket";
+      const remainingFraction = number(b.remainingFraction);
+      if (remainingFraction === undefined) continue;
+      const remaining = Math.round(clamp(remainingFraction * 100));
+      const resetTimeStr = stringValue(b.resetTime);
+      const resetTs = resetTimeStr ? Date.parse(resetTimeStr) : NaN;
+      const resetsAt = Number.isFinite(resetTs) ? Math.floor(resetTs / 1_000) : undefined;
+      const windowStr = stringValue(b.window);
+      const rawDisplayName = stringValue(b.displayName);
+
+      let label = rawDisplayName ?? bucketId;
+      if (windowStr === "weekly" || /weekly/i.test(label)) {
+        label = "Weekly limit";
+      } else if (windowStr === "5h" || /five.*hour|5h/i.test(label)) {
+        label = "5h limit";
+      }
+
+      buckets.push({
+        id: `${groupName}:${bucketId}`,
+        label,
+        groupLabel: groupName,
+        remaining,
+        used: 100 - remaining,
+        limit: 100,
+        unit: "percent",
+        ...(resetsAt ? { resetsAt } : {}),
+      });
+    }
+  }
+  if (!buckets.length) throw new Error("Antigravity returned no usage data.");
+  return {
+    providerId: "antigravity",
+    providerName: PROVIDER_NAMES.antigravity,
+    capturedAt,
+    buckets,
+    metrics: [],
+  };
 }
 
 function normalizeCodex(payload: Record<string, unknown>, capturedAt: number): UsageReport {

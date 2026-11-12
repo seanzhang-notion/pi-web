@@ -36,6 +36,8 @@ import { useFontPreferences } from "@/hooks/useFontPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
+import { SubscriptionUsageButton } from "./SubscriptionUsagePopover";
+import { isProviderUsageId } from "@/lib/provider-usage-ids";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -2599,6 +2601,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onShowAll={onLoadAllModels}
               />
             )}
+            {/* Subscription plan usage button next to model */}
+            {(() => {
+              const currentProvider = model?.provider ?? defaultModel?.provider;
+              if (!currentProvider || !isProviderUsageId(currentProvider)) return null;
+              return <SubscriptionUsageButton providerId={currentProvider} />;
+            })()}
           </div>
 
           {/* spacer */}
