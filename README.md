@@ -171,6 +171,32 @@ file. Provider errors fail safe by preserving that session. This lease only
 affects automatic idle eviction; explicit shutdown and Stop fallback cleanup
 still take precedence.
 
+## macOS Desktop App
+
+Pi Web includes a native macOS desktop wrapper powered by Electron. It wraps the local Next.js server with macOS native window controls, Dock badge integration, native application menus (`⌘N` for New Session, `⌘,` for Preferences, full clipboard shortcuts), and external link handling.
+
+### Running the macOS App in Development
+
+```bash
+npm run mac
+```
+
+This starts Electron, launches or attaches to the local Pi Web server on `http://127.0.0.1:30141`, and opens the native Mac desktop window.
+
+### Building the Standalone `.app` Bundle
+
+```bash
+npm run mac:build
+```
+
+This produces a standalone `Pi Web.app` inside `dist/Pi Web-darwin-<arch>/` with the native `.icns` application icon, pre-configured bundle metadata, and self-contained process lifecycle management. You can launch it with:
+
+```bash
+open "dist/Pi Web-darwin-arm64/Pi Web.app"
+```
+
+or copy it to `/Applications`.
+
 ## Development
 
 ```bash
@@ -200,6 +226,7 @@ components/      React UI components
 hooks/           Client state and interaction hooks
 lib/             Session, agent, model, file, Git, and security logic
 public/          Static assets and PWA files
+electron/        macOS desktop application wrapper, native menus, icon, and lifecycle
 bin/             npm CLI entrypoint and launch option parsing
 docs/            Focused user and contributor guides
 demo/            Static browser demo published to GitHub Pages (see demo/README.md)
