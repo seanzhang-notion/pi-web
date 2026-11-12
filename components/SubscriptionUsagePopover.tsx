@@ -133,50 +133,65 @@ export function SubscriptionUsageButton({
     };
   }, []);
 
-  // Sync activeProviderId with preferredProviderId or default to first connected provider
+  // When preferredProviderId (selected model's provider) changes, sync activeProviderId
+  const prevPreferredRef = useRef(preferredProviderId);
   useEffect(() => {
-    const normalized = preferredProviderId ? normalizeProviderId(preferredProviderId) : "";
-    if (normalized && (connectedProviders.some((p) => p.id === normalized) || isProviderUsageId(normalized))) {
-      setActiveProviderId(normalized);
-    } else if (connectedProviders.length > 0 && !connectedProviders.some((p) => p.id === activeProviderId)) {
-      setActiveProviderId(connectedProviders[0].id);
-    } else if (!activeProviderId && preferredProviderId && isProviderUsageId(preferredProviderId)) {
-      setActiveProviderId(preferredProviderId);
+    if (preferredProviderId !== prevPreferredRef.current) {
+      prevPreferredRef.current = preferredProviderId;
+      const normalized = preferredProviderId ? normalizeProviderId(preferredProviderId) : "";
+      if (normalized) {
+        setActiveProviderId(normalized);
+      }
     }
-  }, [preferredProviderId, connectedProviders, activeProviderId]);
+  }, [preferredProviderId]);
 
-  // Load cached usage from localStorage for activeProviderId
+  // Initial activeProviderId when connectedProviders loads
+  useEffect(() => {
+    if (!activeProviderId && connectedProviders.length > 0) {
+      const normalized = preferredProviderId ? normalizeProviderId(preferredProviderId) : "";
+      if (normalized && (connectedProviders.some((p) => p.id === normalized) || isProviderUsageId(normalized))) {
+        setActiveProviderId(normalized);
+      } else {
+        setActiveProviderId(connectedProviders[0].id);
+      }
+    }
+  }, [connectedProviders, preferredProviderId, activeProviderId]);
+
+  // Load cached usage from localStorage for activeProviderId if not in memory
   useEffect(() => {
     if (!activeProviderId) return;
-    try {
-      const cached = localStorage.getItem(`${STORAGE_PREFIX}${activeProviderId}`);
-      if (cached) {
-        const parsed = JSON.parse(cached) as UsageResponse;
-        if (parsed?.status === "ready" && parsed.report && Array.isArray(parsed.report.buckets)) {
-          setSnapshots((prev) => ({ ...prev, [activeProviderId]: parsed }));
+    if (!snapshots[activeProviderId]) {
+      try {
+        const cached = localStorage.getItem(`${STORAGE_PREFIX}${activeProviderId}`);
+        if (cached) {
+          const parsed = JSON.parse(cached) as UsageResponse;
+          if (parsed?.status === "ready" && parsed.report) {
+            setSnapshots((prev) => ({ ...prev, [activeProviderId]: parsed }));
+          }
         }
+      } catch {
+        try { localStorage.removeItem(`${STORAGE_PREFIX}${activeProviderId}`); } catch {}
       }
-    } catch {
-      try { localStorage.removeItem(`${STORAGE_PREFIX}${activeProviderId}`); } catch {}
     }
     setError(null);
-  }, [activeProviderId]);
+  }, [activeProviderId, snapshots]);
 
-  const query = useCallback(async (targetProviderId = activeProviderId) => {
-    if (!targetProviderId) return;
+  const query = useCallback(async (targetProviderId?: string) => {
+    const idToQuery = targetProviderId ?? activeProviderId;
+    if (!idToQuery) return;
     setQuerying(true);
     setError(null);
     try {
       const response = await fetch("/api/provider-usage/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerId: targetProviderId }),
+        body: JSON.stringify({ providerId: idToQuery }),
       });
       const result = (await response.json()) as UsageResponse & { error?: string };
       if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
       if (result.status === "ready") {
-        setSnapshots((prev) => ({ ...prev, [targetProviderId]: result }));
-        try { localStorage.setItem(`${STORAGE_PREFIX}${targetProviderId}`, JSON.stringify(result)); } catch {}
+        setSnapshots((prev) => ({ ...prev, [idToQuery]: result }));
+        try { localStorage.setItem(`${STORAGE_PREFIX}${idToQuery}`, JSON.stringify(result)); } catch {}
       } else {
         setError(result.message ?? t("providerUsage.queryFailed"));
       }
@@ -187,27 +202,66 @@ export function SubscriptionUsageButton({
     }
   }, [activeProviderId, t]);
 
-  // When opening, if there is no snapshot or if older than 60s, query fresh usage
+  // When opening, default to preferredProviderId (current model's provider) if valid,
+  // or current activeProviderId, and query fresh usage if stale (>60s)
   const handleToggle = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
     if (disabled) return;
     const rect = e.currentTarget.getBoundingClientRect();
     setAnchorRect({ top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width });
     setOpen((prev) => {
       const next = !prev;
-      if (next && activeProviderId) {
-        const captured = snapshots[activeProviderId]?.report?.capturedAt;
-        if (!captured || Date.now() - captured > 60_000) {
-          query(activeProviderId);
+      if (next) {
+        // Default to current model's provider on open
+        const normalized = preferredProviderId ? normalizeProviderId(preferredProviderId) : "";
+        const targetId = normalized && (connectedProviders.some((p) => p.id === normalized) || isProviderUsageId(normalized))
+          ? normalized
+          : activeProviderId || (connectedProviders[0]?.id ?? "");
+
+        if (targetId && targetId !== activeProviderId) {
+          setActiveProviderId(targetId);
+        }
+
+        if (targetId) {
+          let snapshot = snapshots[targetId];
+          if (!snapshot) {
+            try {
+              const cached = localStorage.getItem(`${STORAGE_PREFIX}${targetId}`);
+              if (cached) {
+                const parsed = JSON.parse(cached) as UsageResponse;
+                if (parsed?.status === "ready" && parsed.report) {
+                  snapshot = parsed;
+                  setSnapshots((s) => ({ ...s, [targetId]: parsed }));
+                }
+              }
+            } catch {}
+          }
+          const captured = snapshot?.report?.capturedAt;
+          if (!captured || Date.now() - captured > 60_000) {
+            query(targetId);
+          }
         }
       }
       return next;
     });
-  }, [disabled, activeProviderId, snapshots, query]);
+  }, [disabled, preferredProviderId, connectedProviders, activeProviderId, snapshots, query]);
 
-  // Handle tab switch
+  // Handle tab switch: switch to clicked provider, read cache or query immediately
   const handleSelectProvider = useCallback((id: string) => {
     setActiveProviderId(id);
-    const captured = snapshots[id]?.report?.capturedAt;
+    let snapshot = snapshots[id];
+    if (!snapshot) {
+      try {
+        const cached = localStorage.getItem(`${STORAGE_PREFIX}${id}`);
+        if (cached) {
+          const parsed = JSON.parse(cached) as UsageResponse;
+          if (parsed?.status === "ready" && parsed.report) {
+            snapshot = parsed;
+            setSnapshots((prev) => ({ ...prev, [id]: parsed }));
+          }
+        }
+      } catch {}
+    }
+    const captured = snapshot?.report?.capturedAt;
     if (!captured || Date.now() - captured > 60_000) {
       query(id);
     }
@@ -430,7 +484,7 @@ export function SubscriptionUsageButton({
                 }}
               >
                 {connectedProviders.map((provider) => {
-                  const isSelected = activeProviderId === provider.id;
+                  const isSelected = activeProviderId === provider.id || normalizeProviderId(activeProviderId) === normalizeProviderId(provider.id);
                   return (
                     <button
                       key={provider.id}
@@ -438,17 +492,18 @@ export function SubscriptionUsageButton({
                       onClick={() => handleSelectProvider(provider.id)}
                       style={{
                         flex: "1 1 auto",
-                        padding: "5px 10px",
+                        padding: "5px 12px",
                         fontSize: 12,
                         fontWeight: isSelected ? 600 : 400,
-                        border: "none",
-                        borderRadius: 5,
-                        background: isSelected ? "var(--bg-hover, rgba(255, 255, 255, 0.08))" : "transparent",
+                        border: isSelected ? "1.5px solid var(--accent, #f59e0b)" : "1.5px solid transparent",
+                        borderRadius: 6,
+                        background: isSelected ? "var(--bg, var(--bg-hover))" : "transparent",
                         color: isSelected ? "var(--text)" : "var(--text-muted)",
+                        boxShadow: isSelected ? "0 1px 3px rgba(0, 0, 0, 0.12)" : "none",
                         cursor: "pointer",
                         whiteSpace: "nowrap",
                         textAlign: "center",
-                        transition: "background 0.12s, color 0.12s",
+                        transition: "all 0.12s ease",
                       }}
                     >
                       {provider.name}
