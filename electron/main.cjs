@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 "use strict";
 
-const { app, BrowserWindow, shell, ipcMain } = require("electron");
+const { app, BrowserWindow, shell, ipcMain, nativeImage } = require("electron");
+const fs = require("fs");
 const path = require("path");
 const { ServerManager } = require("./server-manager.cjs");
 const { buildAppMenu } = require("./menu.cjs");
@@ -104,9 +105,14 @@ ipcMain.on("electron:set-badge", (_event, badgeText) => {
 
 app.whenReady().then(async () => {
   if (process.platform === "darwin" && app.dock) {
-    const iconPath = path.join(__dirname, "assets", "icon.icns");
+    const pngPath = path.join(__dirname, "assets", "icon.png");
+    const icnsPath = path.join(__dirname, "assets", "icon.icns");
     try {
-      app.dock.setIcon(iconPath);
+      const targetPath = fs.existsSync(pngPath) ? pngPath : icnsPath;
+      const img = nativeImage.createFromPath(targetPath);
+      if (!img.isEmpty()) {
+        app.dock.setIcon(img);
+      }
     } catch {
       // Icon will fall back to application bundle icon
     }
