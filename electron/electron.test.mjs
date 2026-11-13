@@ -13,6 +13,18 @@ test("macOS application bundle icon exists and is non-empty", () => {
   assert.ok(fs.existsSync(iconPath), "icon.icns must exist");
   const stats = fs.statSync(iconPath);
   assert.ok(stats.size > 10_000, `icon.icns size (${stats.size}) should be substantial`);
+
+  const png1024 = path.join(rootDir, "electron", "assets", "icon.png");
+  assert.ok(fs.existsSync(png1024), "icon.png must exist");
+  const png1024Buf = fs.readFileSync(png1024);
+  assert.equal(png1024Buf.readUInt32BE(16), 1024, "icon.png width must be 1024");
+  assert.equal(png1024Buf.readUInt32BE(20), 1024, "icon.png height must be 1024");
+
+  const png512 = path.join(rootDir, "electron", "assets", "icon-512.png");
+  assert.ok(fs.existsSync(png512), "icon-512.png must exist");
+  const png512Buf = fs.readFileSync(png512);
+  assert.equal(png512Buf.readUInt32BE(16), 512, "icon-512.png width must be 512");
+  assert.equal(png512Buf.readUInt32BE(20), 512, "icon-512.png height must be 512");
 });
 
 test("package.json has correct Electron main entry point and mac scripts", () => {

@@ -108,7 +108,7 @@ app.whenReady().then(async () => {
     const pngPath = path.join(__dirname, "assets", "icon.png");
     const icnsPath = path.join(__dirname, "assets", "icon.icns");
     try {
-      const targetPath = fs.existsSync(pngPath) ? pngPath : icnsPath;
+      const targetPath = fs.existsSync(icnsPath) ? icnsPath : pngPath;
       const img = nativeImage.createFromPath(targetPath);
       if (!img.isEmpty()) {
         app.dock.setIcon(img);
